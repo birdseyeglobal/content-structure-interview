@@ -2,246 +2,152 @@
 
 ## Overview
 
-Build a system that analyzes a brand's website structure, scores it against empirically validated predictors of LLM citation, generates actionable recommendations, and can directly optimize content structure.
+We want to help brands understand and improve how their website structure affects their visibility in AI-generated responses. Our research (see attached paper) has established that the way pages link to each other within a site is a strong predictor of whether LLMs cite those pages. We want to turn these findings into a product.
 
 This is a **progressive design and implementation exercise** with three phases of increasing complexity.
 
 ---
 
-## Background
+## Context
 
-Our research (see attached paper) analyzed 18.7M LLM citations across ~2.9M crawled pages and found that internal link topology is a strong, statistically significant predictor of whether LLMs cite a brand's pages. The key findings:
+### The Problem
 
-- **Hub dominance** (asymmetric authority structure) is the strongest size-independent predictor of citation rate
-- **Link density/reciprocity** are *negative* predictors — uniform link meshes (nav bars, product grids) are the least citable content structures
-- **Cross-section connectivity** (links from other parts of the site) increases citability by up to 738%
-- **Content hierarchy** (depth variation) is the strongest predictor of whether content gets cited at all
-- **Topology archetypes** (hub_spoke, tree, mesh, clique, mixed) significantly predict citation rate (p=0.00003)
+Brands have no visibility into whether their website's internal structure helps or hurts their chances of being cited by LLMs. They invest heavily in content quality but have no tools to evaluate or improve their site's structural health from an AI discoverability perspective.
 
-We want to turn these findings into a product feature.
+### What We Know
 
----
+Our research analyzed millions of LLM citations and crawled pages. The key findings are in the attached research paper. In summary:
 
-## Data Available
+- How pages link to each other within a site strongly predicts citation rates
+- Not all linking is good — some link patterns actively hurt citability
+- Pages that are structurally well-positioned (clear authority hierarchy, cross-section visibility, topical coherence) get cited significantly more
+- These structural signals are independent of content quality
 
-You have access to the following production data:
+### What We Have
 
-| Table | Key Fields | Notes |
-|---|---|---|
-| `web_crawl_page` | `brand_id`, `url`, `canonical_url`, `depth`, `links_internal` (JSONB array of link objects with `href`, `text`), `webpage_id` | The raw link graph |
-| `document` | `brand_id`, `webpage_id`, `web_crawl_page_id`, `topic_embedding` (768-dim pgvector) | Semantic embeddings |
-| `webpage` | `id`, `brand_id`, `canonical_url`, `current_document_id` | Stable URL identity |
-| `citation` | `webpage_id`, `brand_id`, `url`, `canonical_url` | LLM citation records |
-| `topic` | `name`, `name_embedding` (pgvector), `workspace_id` | Brand-defined topics |
+We operate an existing platform that:
 
-**Join path**: `web_crawl_page` → `webpage` (via `webpage_id`) ← `citation` (via `webpage_id`)
+- **Crawls customer websites** — we have each page's content, its links to other pages on the same site, and how deep it sits in the site hierarchy
+- **Tracks LLM citations** — we monitor which customer pages get cited in AI responses and how often
+- **Generates content embeddings** — we compute semantic vectors for each page's content, enabling similarity and coherence analysis
 
-**Embedding access**: `document.topic_embedding` is a 768-dim vector with HNSW cosine index. Use `cosine_distance()`, `l2_normalize()`, and vector `AVG()` for centroid computation.
-
-**Link graph extraction**: Each `web_crawl_page.links_internal` is a JSONB array. Use `jsonb_array_elements()` to extract individual links. Each link has at minimum an `href` field.
+The candidate should assume this data exists and design systems that consume it. How they choose to model, transform, and structure this data for their system is part of the design exercise.
 
 ---
 
 ## Phase 1: Content Structure Score
 
-### Objective
+### Goal
 
-Given a brand, analyze its crawled pages and produce a **per-cluster content structure score** that predicts LLM citability based on the structural metrics from the research.
+Give brands a clear, interpretable score that reflects how well their site's internal structure supports LLM citability.
 
 ### Requirements
 
-#### P1-R1: Graph Construction
-- **Given**: A brand's crawled pages with their internal links
-- **Produce**: A directed graph where nodes are pages and edges are internal links
-- **Constraints**: Handle self-links, links to uncrawled pages, duplicate links, and pages with no links
+**R1.1** — The system must analyze a brand's website and produce a **site-level content structure score** that communicates overall structural health.
 
-#### P1-R2: Cluster Identification
-- Partition the graph into content clusters (loci)
-- You may use URL-path segmentation, graph-based community detection (e.g., Louvain), or a hybrid approach
-- Minimum cluster size: 4 pages
-- Document your choice and its tradeoffs
+**R1.2** — The system must break the site into meaningful **content sections** and score each one independently, so brands can see which parts of their site are structurally strong or weak.
 
-#### P1-R3: Structural Metric Computation
-For each cluster, compute at minimum:
+**R1.3** — For each section, the system must surface the **specific structural factors** contributing to its score — both positive and negative — so the brand understands *why* the score is what it is.
 
-| Metric | Definition | Research finding |
-|---|---|---|
-| `page_count` | Number of pages | Larger clusters more citable (ρ=+0.459) |
-| `avg_in_degree` | Mean internal backlinks per page | Positive predictor (ρ=+0.264) |
-| `link_density` | Edges / max possible edges | **Negative** predictor (ρ=-0.352) |
-| `hub_dominance` | Fraction of edges pointing to top page | Strongest size-independent predictor (partial ρ=+0.214) |
-| `boundary_in_edges` | Inbound links from other clusters | Strong positive (ρ=+0.400) |
-| `depth_stddev` | Std dev of page depths | Predicts citation existence (r_pb=+0.253) |
+**R1.4** — Scores must be grounded in the research findings. The candidate should justify which structural signals they incorporate and how they weight them.
 
-Optional but valuable:
-- `reciprocity`, `degree_gini`, `pagerank_gini`, `clustering_coeff`
-- `embedding_variance` (requires vector operations)
-- Topology archetype classification
-
-#### P1-R4: Composite Score
-- Combine metrics into a single 0-100 score per cluster
-- Account for the zero-inflation problem (41-50% of clusters are uncited)
-- Normalize across different cluster sizes
-- Justify your weighting/combination method
-
-#### P1-R5: Brand-Level Summary
-- Aggregate cluster scores into a brand-level content structure health score
-- Identify the brand's strongest and weakest clusters
+**R1.5** — The scoring system must handle the reality that most content sections on most sites will have zero or very few citations. The score should still be meaningful for uncited sections.
 
 ### User Stories
 
-- **US-1.1**: As a brand manager, I can see a content structure score for my entire site so I know my overall structural health.
-- **US-1.2**: As a brand manager, I can see scores broken down by content cluster so I know which sections of my site are structurally strong or weak.
-- **US-1.3**: As a brand manager, I can see which specific structural metrics are driving my score up or down, so I understand *why* my score is what it is.
+- As a brand manager, I can see a single score that tells me how structurally healthy my site is for AI visibility, so I know whether I need to take action.
+- As a brand manager, I can see which sections of my site are structurally strong and which are weak, so I know where to focus.
+- As a brand manager, I can see what's driving each section's score up or down, so I understand the problem before trying to fix it.
 
 ### Acceptance Criteria
 
-- [ ] Given a brand with 100-500 crawled pages, the system produces cluster scores within 30 seconds
-- [ ] Scores are reproducible (same input → same output)
-- [ ] The scoring method is documented with justification tied to the research findings
-- [ ] Edge cases handled: brands with <4 pages per cluster, pages with no internal links, disconnected subgraphs
+- Given a brand with several hundred pages, the system produces scores in a reasonable timeframe
+- Scores are deterministic — same input produces the same output
+- The scoring rationale is explainable and tied to research findings
+- The system degrades gracefully when data is sparse (few pages, few links, missing embeddings)
 
 ---
 
 ## Phase 2: Content Structure Recommendations
 
-### Objective
+### Goal
 
-Given a brand's cluster scores and the underlying link graph, generate **specific, prioritized, actionable recommendations** for improving content structure.
+Go beyond scoring to tell brands *what to do* — generate specific, prioritized, actionable recommendations for improving their content structure.
 
 ### Requirements
 
-#### P2-R1: Recommendation Taxonomy
-Define and implement at least 4 recommendation types:
+**R2.1** — The system must generate **specific recommendations** — not generic advice like "add more links," but concrete actions referencing actual pages or sections on the brand's site.
 
-| Type | When to trigger | Example output |
-|---|---|---|
-| `add_internal_links` | Low hub_dominance or avg_in_degree | "Add links from pages [A, B, C] to hub page [X]" |
-| `create_hub_page` | Cluster has no clear authority page | "Create a hub page for the '/pricing' cluster linking to [list of pages]" |
-| `reduce_link_symmetry` | High reciprocity or link_density, mesh/clique topology | "The '/products' cluster has mesh topology (13.6% citation rate). Restructure as hub-spoke." |
-| `improve_cross_section_links` | Low boundary_in_edges or boundary_ratio | "Connect cluster '/blog' to cluster '/case-studies' — they share semantic theme X" |
-| `consolidate_cluster` | High embedding_variance in large cluster | "Split '/resources' into 2 focused sub-clusters based on topic similarity" |
-| `promote_depth` | Low depth_stddev | "Add intermediate category pages to create a content hierarchy" |
+**R2.2** — Recommendations must be **categorized by type** so brands understand the nature of each suggested change (e.g., linking changes vs. content organization vs. new content creation).
 
-#### P2-R2: Specificity
-Each recommendation must reference:
-- The target cluster and its current score
-- Specific pages involved (URLs)
-- The structural metric being addressed
-- The expected score improvement (quantified)
+**R2.3** — Recommendations must be **prioritized** by expected impact. Brands have limited resources — they need to know what to fix first.
 
-#### P2-R3: Prioritization
-Rank recommendations by **impact × feasibility**:
-- **Impact**: How much would the score improve? Use the research quintile data to estimate (e.g., moving from Q1 to Q3 of hub_dominance)
-- **Feasibility**: How many pages need to change? How complex is the change?
-- Recommendations should not conflict with each other
+**R2.4** — Each recommendation must include an **estimated impact** — how much would implementing this recommendation improve the score?
 
-#### P2-R4: Dependency Awareness
-- Changing one cluster's structure affects neighboring clusters (boundary metrics)
-- The system should flag when recommendations interact
+**R2.5** — The system must account for **interactions between recommendations**. Structural changes in one part of the site can affect other parts. The system should warn when recommendations conflict or when implementing one changes the priority of another.
 
 ### User Stories
 
-- **US-2.1**: As a brand manager, I see a prioritized list of recommendations for improving my content structure, with the highest-impact items first.
-- **US-2.2**: As a content strategist, I see specific pages I should link together, so I can take action immediately without further analysis.
-- **US-2.3**: As a brand manager, I can see the expected score improvement for each recommendation so I can decide which ones are worth the effort.
-- **US-2.4**: As a content strategist, I am warned when two recommendations interact with each other so I don't make conflicting changes.
+- As a brand manager, I see a prioritized list of recommendations with the highest-impact items first, so I can plan my team's work.
+- As a content strategist, I see exactly which pages to modify and how, so I can take action without further analysis.
+- As a brand manager, I can see the expected score improvement for each recommendation, so I can decide which are worth the effort.
+- As a content strategist, I am warned when recommendations interact with each other, so I don't make conflicting changes.
 
 ### Acceptance Criteria
 
-- [ ] At least 4 distinct recommendation types implemented
-- [ ] Each recommendation includes specific page URLs and expected metric impact
-- [ ] Recommendations are sorted by priority
-- [ ] No two recommendations in the list directly contradict each other
-- [ ] Recommendations reference the research findings that motivate them
+- Recommendations reference specific pages or sections by URL
+- Each recommendation has a type, a priority rank, and an estimated score impact
+- No two recommendations in the output directly contradict each other
+- Recommendations are grounded in the research — each one should trace back to a finding
 
 ---
 
 ## Phase 3: Direct Content Structure Optimization
 
-### Objective
+### Goal
 
-The system can **directly modify** a brand's content structure — inserting internal links, proposing page reorganizations, generating hub page outlines — with safety constraints and impact simulation.
+Move from advice to action — the system can propose and simulate concrete structural changes to a brand's site, with appropriate safety guardrails.
 
 ### Requirements
 
-#### P3-R1: Change Simulation
-Before applying any change:
-- Build the proposed link graph (current graph + proposed modifications)
-- Recompute all structural metrics on the proposed graph
-- Compare before/after scores
-- Reject changes that decrease the overall score or violate constraints
+**R3.1** — The system must be able to **propose specific structural edits** to the site (e.g., specific links to add between specific pages, pages to reorganize, new hub content to create).
 
-#### P3-R2: Semantic Validation
-Link insertions must be semantically valid:
-- Use page embeddings (`document.topic_embedding`) to verify that source and target pages are topically related
-- Define a minimum similarity threshold
-- Generate contextually appropriate anchor text based on the target page's content
+**R3.2** — Before any change is applied, the system must **simulate its impact** — show the brand what their scores would look like after the change, before they commit.
 
-#### P3-R3: Optimization Strategy
-For a given cluster, identify the optimal set of link modifications:
-- Select the best hub candidate (highest existing in-degree, or best embedding centrality within the cluster)
-- Identify supporting pages that should link to the hub but don't
-- Rank candidate links by expected impact (metric improvement per link added)
-- Apply diminishing returns — the marginal value of each additional link decreases
+**R3.3** — Proposed changes must be **semantically valid** — you can't just link any page to any other page. The system must ensure that suggested connections make sense given the content of the pages involved.
 
-#### P3-R4: Safety Constraints
-- Maximum number of links added per page per optimization pass
-- No links that would create the negative patterns identified in the research (increasing link_density beyond a threshold, creating reciprocal mesh structures)
-- Human-reviewable change sets: output must be auditable before application
-- Rollback capability: all changes can be undone
+**R3.4** — The system must enforce **safety constraints** — it should not propose changes that would create the structural anti-patterns identified in the research. It should recognize diminishing returns.
 
-#### P3-R5: Second-Order Effects
-- Adding links to one cluster changes boundary metrics for adjacent clusters
-- The optimizer should consider the global impact, not just per-cluster optimization
-- Flag cases where optimizing cluster A would degrade cluster B
+**R3.5** — The system must account for **second-order effects** — optimizing one section of the site can degrade another. The system should surface these tradeoffs.
 
-#### P3-R6: Feedback Loop Design
-- After changes are applied and new citation data is collected, compare actual citation changes to predicted impact
-- Track whether the correlational findings from the research translate to causal improvements
-- Design the measurement framework (what to measure, how long to wait, what constitutes success)
+**R3.6** — Change proposals must be **human-reviewable** — the system presents a changeset that a human approves, not a black box that auto-applies changes.
+
+**R3.7** — The system must include a **feedback loop design** — after changes are applied, how do we measure whether they actually improved citations? The research is correlational; the system should help us learn whether these optimizations are causal.
 
 ### User Stories
 
-- **US-3.1**: As a brand manager, I can preview proposed structural changes and see the simulated impact on my scores before anything is applied.
-- **US-3.2**: As a content strategist, I receive specific link insertion suggestions with auto-generated anchor text that I can approve or reject one by one.
-- **US-3.3**: As a brand manager, I can see when optimizing one section of my site would negatively impact another section.
-- **US-3.4**: As a product owner, I can measure whether structural optimizations actually improved LLM citation rates over time, so I know the recommendations are working.
+- As a brand manager, I can preview exactly what the system wants to change and see the projected score impact before anything is applied.
+- As a content strategist, I receive specific edit suggestions (e.g., "add a link from page X to page Y with this anchor text") that I can approve or reject individually.
+- As a brand manager, I can see when optimizing one section would negatively impact another section.
+- As a product owner, I can measure whether optimizations actually improved citation rates over time, so I know the system is working.
 
 ### Acceptance Criteria
 
-- [ ] Changes are simulated before application with before/after metric comparison
-- [ ] Link suggestions are validated for semantic relevance using embeddings
-- [ ] The system identifies diminishing returns and stops adding links when marginal impact drops below a threshold
-- [ ] No optimization pass can increase link_density or reciprocity above research-identified negative thresholds
-- [ ] Change sets are human-reviewable (not auto-applied)
-- [ ] The system flags second-order effects on neighboring clusters
+- Every proposed change includes a before/after score comparison
+- Link suggestions are validated for topical relevance
+- The system identifies and communicates diminishing returns
+- The system prevents changes that would introduce known negative structural patterns
+- All changesets are human-reviewable
+- The design includes a measurement framework for validating causal impact
 
 ---
 
-## Evaluation Notes for Interviewer
+## What This Document Does NOT Specify
 
-### Phase 1 focuses on:
-- Data modeling and graph construction
-- Translating research findings into computable metrics
-- Handling messy real-world data (zero-inflation, skew, missing data)
-- Justifying design decisions with evidence
+The following are intentionally left to the candidate to design:
 
-### Phase 2 focuses on:
-- Going from data to actionable output
-- Prioritization and ranking logic
-- Specificity — vague recommendations are not useful
-- Awareness of interactions between recommendations
-
-### Phase 3 focuses on:
-- Systems thinking — second-order effects, global vs local optimization
-- Safety and reversibility
-- Distinguishing correlation from causation
-- Feedback loop design and measurement
-
-### What strong candidates demonstrate:
-- They question the research (sample bias, correlational limitations, contradictions between experiments)
-- They make explicit tradeoffs (URL-path vs graph clustering, speed vs accuracy)
-- Their recommendations are specific enough to act on (page URLs, not abstract advice)
-- They simulate before they commit
-- They acknowledge what they don't know (will optimizing for these metrics *cause* more citations?)
+- **Data modeling** — How you structure, transform, and store the data is your decision. The platform provides crawled pages, links, embeddings, and citations. How you model these for your system is part of the exercise.
+- **Algorithm choices** — How you identify content sections, what graph algorithms you use, how you compute similarity — these are design decisions you should make and justify.
+- **Metric definitions** — The research identifies many structural signals. Which ones you use, how you compute them, and how you combine them into scores is up to you.
+- **Architecture** — Whether this is a batch pipeline, a real-time service, or something else is your call.
+- **Technology choices** — Use whatever language, framework, or libraries you prefer.
